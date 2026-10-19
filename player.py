@@ -61,11 +61,12 @@ class Signboard:
         root.configure(bg=BG_COLOR)
         root.geometry("1000x300")
 
+        self.build_panel()
+
         self.canvas = tk.Canvas(root, bg=BG_COLOR, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.item = self.canvas.create_text(0, 0, text="", anchor="w",
                                             fill=TEXT_COLOR, font=self.font)
-        self.build_panel()
 
         self.canvas.bind("<Configure>", lambda e: self.schedule_rebuild())
         root.bind("<space>", lambda e: self.toggle_pause())
