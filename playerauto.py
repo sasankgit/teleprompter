@@ -38,6 +38,7 @@ class AutoSignboard(Signboard):
 
     def build_panel(self):
         panel = tk.Frame(self.root, bg="#161616")
+        self.panel = panel
         panel.pack(fill="x", side="bottom")
 
         tk.Label(panel, text="Speed", bg="#161616", fg="#dddddd").pack(
@@ -83,11 +84,6 @@ class AutoSignboard(Signboard):
                 command=on_change,
             )
             scale.pack(side="left", padx=(0, 10))
-            scale.bind(
-                "<Motion>",
-                lambda event, widget=scale, minimum=low, maximum=high:
-                    self.adjust_from_hover(event, widget, minimum, maximum),
-            )
             scale.bind("<ButtonRelease-1>", lambda _event: self.root.focus_set())
 
         add_speed_button("Slower", -1)
@@ -136,14 +132,6 @@ class AutoSignboard(Signboard):
         if self.speed_hover_job is not None:
             self.root.after_cancel(self.speed_hover_job)
             self.speed_hover_job = None
-
-    def adjust_from_hover(self, event, scale, low, high):
-        start_x = scale.coords(low)[0]
-        end_x = scale.coords(high)[0]
-        if end_x <= start_x:
-            return
-        fraction = clamp((event.x - start_x) / (end_x - start_x), 0.0, 1.0)
-        scale.set(round(low + fraction * (high - low)))
 
     def get_selected_text(self):
         control = auto.GetFocusedControl()

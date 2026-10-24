@@ -51,6 +51,7 @@ class Signboard:
         self.last = time.time()
         self.text = ""
         self.rebuild_job = None
+        self.drag_origin = None
 
         self.speed_var = tk.IntVar(value=clamp(int(args.speed), SPEED_MIN, SPEED_MAX))
         self.size_var = tk.IntVar(value=clamp(args.size, SIZE_MIN, SIZE_MAX))
@@ -60,8 +61,11 @@ class Signboard:
         root.title("Text Signboard")
         root.configure(bg=BG_COLOR)
         root.geometry("1000x300")
+        root.attributes("-topmost", True)
+        root.attributes("-alpha", 0.50)
 
         self.build_panel()
+        self.add_drag_handle()
 
         self.canvas = tk.Canvas(root, bg=BG_COLOR, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
@@ -86,6 +90,7 @@ class Signboard:
     # ---------- control panel ----------
     def build_panel(self):
         panel = tk.Frame(self.root, bg=PANEL_BG)
+        self.panel = panel
         panel.pack(fill="x", side="bottom")
 
         def slider(label, var, lo, hi, on_change):
@@ -101,6 +106,44 @@ class Signboard:
         slider("Speed", self.speed_var, SPEED_MIN, SPEED_MAX, lambda v: None)
         slider("Text size", self.size_var, SIZE_MIN, SIZE_MAX,
                lambda v: self.schedule_rebuild())
+
+    def add_drag_handle(self):
+        handle = tk.Button(
+            self.panel,
+            text="Move",
+            bg="#333333",
+            fg=PANEL_FG,
+            activebackground="#555555",
+            activeforeground=PANEL_FG,
+            relief="flat",
+            takefocus=0,
+            cursor="fleur",
+            padx=6,
+            pady=2,
+        )
+        handle.pack(side="right", padx=6, pady=4)
+        handle.bind("<ButtonPress-1>", self.start_window_drag)
+        handle.bind("<B1-Motion>", self.drag_window)
+        handle.bind("<ButtonRelease-1>", self.stop_window_drag)
+
+    def start_window_drag(self, event):
+        self.drag_origin = (
+            event.x_root,
+            event.y_root,
+            self.root.winfo_x(),
+            self.root.winfo_y(),
+        )
+
+    def drag_window(self, event):
+        if self.drag_origin is None:
+            return
+        pointer_x, pointer_y, window_x, window_y = self.drag_origin
+        x = window_x + event.x_root - pointer_x
+        y = window_y + event.y_root - pointer_y
+        self.root.geometry(f"+{x}+{y}")
+
+    def stop_window_drag(self, _event):
+        self.drag_origin = None
 
     def nudge(self, var, delta, lo, hi):
         var.set(clamp(var.get() + delta, lo, hi))
