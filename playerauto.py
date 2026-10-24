@@ -97,7 +97,7 @@ class AutoSignboard(Signboard):
             lambda _value: self.schedule_rebuild(),
         )
         self.status_var = tk.StringVar(
-            value="Select text in another app or copy text to update the prompter."
+            value=""
         )
         tk.Label(
             panel,
@@ -105,7 +105,9 @@ class AutoSignboard(Signboard):
             bg="#161616",
             fg="#aaaaaa",
             anchor="w",
-        ).pack(side="left", fill="x", expand=True, padx=8)
+            width=10,
+            wraplength=90,
+        ).pack(side="right", padx=4)
 
     def adjust_speed(self, amount):
         self.speed_var.set(
@@ -211,7 +213,7 @@ def main():
     parser.add_argument(
         "--speed",
         type=float,
-        default=150,
+        default=850,
         help=f"scroll speed in pixels/second ({SPEED_MIN}-{SPEED_MAX})",
     )
     parser.add_argument(
