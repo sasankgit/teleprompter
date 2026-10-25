@@ -9,7 +9,16 @@ from pathlib import Path
 
 import uiautomation as auto
 
-from player import SIZE_MAX, SIZE_MIN, SPEED_MAX, SPEED_MIN, Signboard, clamp
+from player import read_text
+from ui import (
+    END_MARKER_GAP,
+    SIZE_MAX,
+    SIZE_MIN,
+    SPEED_MAX,
+    SPEED_MIN,
+    SignboardUI,
+    clamp,
+)
 
 
 POLL_INTERVAL_MS = 250
@@ -18,16 +27,32 @@ HOVER_REPEAT_MS = 150
 HOVER_SPEED_STEP = 10
 
 
-class AutoSignboard(Signboard):
+class AutoSignboard:
     def __init__(self, root, args):
+        self.root = root
+        self.args = args
+        self.paused = False
+        self.pos = 0.0
+        self.text_width = 1
+        self.finished = False
+        self.started = False
+        self.direction = -1
+        self.last = time.time()
+        self.text = ""
+        self.rebuild_job = None
+        self.speed_hover_job = None
+        self.speed_hover_delta = 0
         self.last_clipboard_text = self.read_clipboard(root)
         self.last_selection = None
         self.pending_selection = None
         self.pending_since = 0.0
-        self.speed_hover_job = None
-        self.speed_hover_delta = 0
-        super().__init__(root, args)
+
+        self.ui = SignboardUI(root, self, args, auto_controls=True)
+        self.speed_var = self.ui.speed_var
+        self.size_var = self.ui.size_var
+        self.reload()
         self.root.after(POLL_INTERVAL_MS, self.poll_sources)
+        self.root.after(16, self.tick)
 
     @staticmethod
     def read_clipboard(root):
@@ -35,105 +60,6 @@ class AutoSignboard(Signboard):
             return root.clipboard_get()
         except tk.TclError:
             return None
-
-    def build_panel(self):
-        panel = tk.Frame(self.root, bg="#161616")
-        self.panel = panel
-        panel.pack(fill="x", side="bottom")
-
-        tk.Label(panel, text="Speed", bg="#161616", fg="#dddddd").pack(
-            side="left", padx=(10, 4), pady=6
-        )
-
-        def add_speed_button(label, delta):
-            button = tk.Button(
-                panel,
-                text=label,
-                bg="#333333",
-                fg="#ffffff",
-                activebackground="#555555",
-                activeforeground="#ffffff",
-                relief="flat",
-                takefocus=0,
-                padx=8,
-            )
-            button.pack(side="left", padx=2)
-            button.bind(
-                "<Enter>",
-                lambda _event, direction=delta: self.start_speed_hover(direction),
-            )
-            button.bind("<Leave>", lambda _event: self.stop_speed_hover())
-
-        def add_slider(label, variable, low, high, on_change):
-            if label:
-                tk.Label(panel, text=label, bg="#161616", fg="#dddddd").pack(
-                    side="left", padx=(10, 4), pady=6
-                )
-            scale = tk.Scale(
-                panel,
-                from_=low,
-                to=high,
-                orient="horizontal",
-                variable=variable,
-                length=200,
-                bg="#161616",
-                fg="#dddddd",
-                troughcolor="#333333",
-                highlightthickness=0,
-                takefocus=0,
-                command=on_change,
-            )
-            scale.pack(side="left", padx=(0, 10))
-            scale.bind("<ButtonRelease-1>", lambda _event: self.root.focus_set())
-
-        add_speed_button("Slower", -1)
-        add_speed_button("Faster", 1)
-        add_slider("", self.speed_var, SPEED_MIN, SPEED_MAX, lambda _value: None)
-        add_slider(
-            "Text size",
-            self.size_var,
-            SIZE_MIN,
-            SIZE_MAX,
-            lambda _value: self.schedule_rebuild(),
-        )
-        self.status_var = tk.StringVar(
-            value=""
-        )
-        tk.Label(
-            panel,
-            textvariable=self.status_var,
-            bg="#161616",
-            fg="#aaaaaa",
-            anchor="w",
-            width=10,
-            wraplength=90,
-        ).pack(side="right", padx=4)
-
-    def adjust_speed(self, amount):
-        self.speed_var.set(
-            clamp(self.speed_var.get() + amount, SPEED_MIN, SPEED_MAX)
-        )
-
-    def start_speed_hover(self, direction):
-        if self.speed_hover_job is not None:
-            return
-        self.speed_hover_delta = direction
-        self.adjust_speed(direction * 20)
-        self.speed_hover_job = self.root.after(
-            HOVER_REPEAT_MS, self.repeat_speed_hover
-        )
-
-    def repeat_speed_hover(self):
-        self.speed_hover_job = None
-        self.adjust_speed(self.speed_hover_delta * HOVER_SPEED_STEP)
-        self.speed_hover_job = self.root.after(
-            HOVER_REPEAT_MS, self.repeat_speed_hover
-        )
-
-    def stop_speed_hover(self):
-        if self.speed_hover_job is not None:
-            self.root.after_cancel(self.speed_hover_job)
-            self.speed_hover_job = None
 
     def get_selected_text(self):
         control = auto.GetFocusedControl()
@@ -167,13 +93,13 @@ class AutoSignboard(Signboard):
         self.save_and_reload(text)
         self.last_clipboard_text = text
         self.last_selection = text
-        self.status_var.set("Selected text copied to clipboard and loaded.")
+        self.ui.status_var.set("Selected text copied to clipboard and loaded.")
 
     def poll_sources(self):
         try:
             selection = self.get_selected_text()
         except auto.comtypes.COMError as exc:
-            self.status_var.set(f"Selection capture error: {exc}")
+            self.ui.status_var.set(f"Selection capture error: {exc}")
         else:
             now = time.monotonic()
             if selection != self.pending_selection:
@@ -187,19 +113,132 @@ class AutoSignboard(Signboard):
                 try:
                     self.publish_selection(selection)
                 except (OSError, tk.TclError) as exc:
-                    self.status_var.set(f"Could not publish selected text: {exc}")
+                    self.ui.status_var.set(
+                        f"Could not publish selected text: {exc}"
+                    )
 
         clipboard_text = self.read_clipboard(self.root)
         if clipboard_text and clipboard_text != self.last_clipboard_text:
             try:
                 self.save_and_reload(clipboard_text)
             except OSError as exc:
-                self.status_var.set(f"Could not update {self.args.file}: {exc}")
+                self.ui.status_var.set(
+                    f"Could not update {self.args.file}: {exc}"
+                )
             else:
                 self.last_clipboard_text = clipboard_text
-                self.status_var.set("Clipboard text loaded into the prompter.")
+                self.ui.status_var.set("Clipboard text loaded into the prompter.")
 
         self.root.after(POLL_INTERVAL_MS, self.poll_sources)
+
+    def start_speed_hover(self, direction):
+        if self.speed_hover_job is not None:
+            return
+        self.speed_hover_delta = direction
+        self.nudge(self.speed_var, direction * 20, SPEED_MIN, SPEED_MAX)
+        self.speed_hover_job = self.root.after(
+            HOVER_REPEAT_MS, self.repeat_speed_hover
+        )
+
+    def repeat_speed_hover(self):
+        self.speed_hover_job = None
+        self.nudge(
+            self.speed_var,
+            self.speed_hover_delta * HOVER_SPEED_STEP,
+            SPEED_MIN,
+            SPEED_MAX,
+        )
+        self.speed_hover_job = self.root.after(
+            HOVER_REPEAT_MS, self.repeat_speed_hover
+        )
+
+    def stop_speed_hover(self):
+        if self.speed_hover_job is not None:
+            self.root.after_cancel(self.speed_hover_job)
+            self.speed_hover_job = None
+
+    def nudge(self, variable, delta, low, high):
+        variable.set(clamp(variable.get() + delta, low, high))
+        if variable is self.size_var:
+            self.schedule_rebuild()
+
+    def on_canvas_configure(self, event):
+        if not self.started:
+            self.pos = float(event.width)
+            self.started = True
+        self.schedule_rebuild()
+
+    def schedule_rebuild(self):
+        if self.rebuild_job is not None:
+            self.root.after_cancel(self.rebuild_job)
+        self.rebuild_job = self.root.after(80, self.rebuild)
+
+    def rebuild(self):
+        self.rebuild_job = None
+        self.ui.configure_font(self.size_var.get())
+        self.text_width = max(1, self.ui.measure_text(self.text))
+        if self.finished:
+            self.pos = self.get_finished_text_position(
+                self.ui.canvas_width() / 2
+            )
+        self.ui.set_text(self.text)
+        self.update_canvas_positions()
+
+    def update_canvas_positions(self):
+        self.ui.update_canvas_positions(self.pos, self.get_end_marker_x())
+
+    def reload(self):
+        try:
+            self.text = read_text(self.args.file)
+        except FileNotFoundError:
+            self.text = f"File not found: {self.args.file}"
+        self.finished = False
+        self.pos = float(self.ui.canvas_width())
+        self.rebuild()
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+
+    def toggle_fullscreen(self):
+        self.root.attributes(
+            "-fullscreen", not bool(self.root.attributes("-fullscreen"))
+        )
+
+    def start_over(self):
+        self.direction = -1
+        self.paused = False
+        self.last = time.time()
+        self.reload()
+
+    def reverse_direction(self):
+        self.direction *= -1
+        self.finished = False
+        self.paused = False
+        self.last = time.time()
+
+    def tick(self):
+        now = time.time()
+        dt = now - self.last
+        self.last = now
+        if not self.paused and not self.finished:
+            self.pos += self.direction * self.speed_var.get() * dt
+            marker_x = self.get_end_marker_x()
+            center_x = self.ui.canvas_width() / 2
+            if self.direction * (marker_x - center_x) >= 0:
+                self.pos = self.get_finished_text_position(center_x)
+                self.finished = True
+        self.update_canvas_positions()
+        self.root.after(16, self.tick)
+
+    def get_end_marker_x(self):
+        if self.direction < 0:
+            return self.pos + self.text_width + END_MARKER_GAP
+        return self.pos - END_MARKER_GAP
+
+    def get_finished_text_position(self, center_x):
+        if self.direction < 0:
+            return center_x - self.text_width - END_MARKER_GAP
+        return center_x + END_MARKER_GAP
 
 
 def main():
@@ -226,7 +265,7 @@ def main():
     args.speed = clamp(int(args.speed), SPEED_MIN, SPEED_MAX)
     args.size = clamp(args.size, SIZE_MIN, SIZE_MAX)
 
-    root = tk.Tk()
+    root = SignboardUI.create_root()
     AutoSignboard(root, args)
     root.mainloop()
 
