@@ -1,7 +1,9 @@
 """Window and control UI for the scrolling signboard."""
 
+import bisect
 import ctypes
 import os
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 from ctypes import wintypes
@@ -15,11 +17,18 @@ SIZE_MIN, SIZE_MAX = 16, 200
 END_MARKER_SIZE = 12
 END_MARKER_GAP = 24
 
+# The text is drawn as many small canvas items instead of one huge item.
+# Tk on Windows cannot draw a single text item that is tens of thousands of
+# pixels wide, so only the chunks that are on screen get drawn.
+CHUNK_CHARS = 120
+VISIBLE_MARGIN_PX = 300
 
 GWL_EXSTYLE = -20
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_LAYERED = 0x00080000
 CLICK_THROUGH_POLL_MS = 20
+
+TOKEN_RE = re.compile(r"\S+\s*|\s+")
 
 
 def clamp(value, low, high):
@@ -65,9 +74,17 @@ class SignboardUI:
 
         self.canvas = tk.Canvas(root, bg=BG_COLOR, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
-        self.item = self.canvas.create_text(
-            0, 0, text="", anchor="w", fill=TEXT_COLOR, font=self.font
-        )
+
+        # Windowed text rendering state.
+        self.text = ""
+        self.layout_key = None
+        self.chunks = []
+        self.chunk_starts = []
+        self.chunk_widths = []
+        self.total_width = 0
+        self.text_items = []
+        self.item_chunk = []
+
         self.end_marker = self.canvas.create_oval(
             0, 0, END_MARKER_SIZE, END_MARKER_SIZE,
             fill="#ff0000", outline="#ff0000",
@@ -415,26 +432,119 @@ class SignboardUI:
                 self.root.after_cancel(job)
                 setattr(self, job_name, None)
 
+    # ------------------------------------------------------------------
+    # Windowed text rendering
+    # ------------------------------------------------------------------
+    @staticmethod
+    def split_chunks(text):
+        """Split text into ~CHUNK_CHARS pieces, preferring word boundaries."""
+        chunks = []
+        current = []
+        current_len = 0
+        for token in TOKEN_RE.findall(text):
+            # A single very long "word" is cut into fixed-size slices.
+            pieces = (
+                [token[i:i + CHUNK_CHARS]
+                 for i in range(0, len(token), CHUNK_CHARS)]
+                if len(token) > CHUNK_CHARS
+                else [token]
+            )
+            for piece in pieces:
+                if current and current_len + len(piece) > CHUNK_CHARS:
+                    chunks.append("".join(current))
+                    current = []
+                    current_len = 0
+                current.append(piece)
+                current_len += len(piece)
+        if current:
+            chunks.append("".join(current))
+        return chunks
+
+    def layout_text(self, text):
+        """Measure every chunk once; cached per (text, font size)."""
+        key = (text, self.font.cget("size"))
+        if key == self.layout_key:
+            return
+        self.layout_key = key
+        self.chunks = self.split_chunks(text)
+        self.chunk_widths = [self.font.measure(chunk) for chunk in self.chunks]
+        self.chunk_starts = []
+        x = 0
+        for width in self.chunk_widths:
+            self.chunk_starts.append(x)
+            x += width
+        self.total_width = x
+        # Force every pooled item to be re-assigned on the next draw.
+        self.item_chunk = [None] * len(self.text_items)
+
     def set_text(self, text):
-        self.canvas.itemconfigure(self.item, text=text)
+        self.text = text
+        self.layout_text(text)
 
     def canvas_width(self):
         return self.canvas.winfo_width()
 
     def measure_text(self, text):
-        return self.font.measure(text)
+        self.layout_text(text)
+        return self.total_width
+
+    def ensure_text_items(self, count):
+        while len(self.text_items) < count:
+            item = self.canvas.create_text(
+                0, 0, text="", anchor="w", fill=TEXT_COLOR, font=self.font,
+                state="hidden",
+            )
+            self.text_items.append(item)
+            self.item_chunk.append(None)
 
     def update_canvas_positions(self, text_x, marker_x):
         center_y = self.canvas.winfo_height() / 2
-        self.canvas.coords(self.item, text_x, center_y)
+        width = self.canvas.winfo_width()
+
+        # Visible range expressed in text coordinates.
+        low = -text_x - VISIBLE_MARGIN_PX
+        high = -text_x + width + VISIBLE_MARGIN_PX
+        visible = []
+        if self.chunks:
+            first = max(0, bisect.bisect_right(self.chunk_starts, low) - 1)
+            index = first
+            while index < len(self.chunks) and self.chunk_starts[index] <= high:
+                if self.chunk_starts[index] + self.chunk_widths[index] >= low:
+                    visible.append(index)
+                index += 1
+
+        self.ensure_text_items(len(visible))
+        for slot, chunk_index in enumerate(visible):
+            item = self.text_items[slot]
+            if self.item_chunk[slot] != chunk_index:
+                self.canvas.itemconfigure(
+                    item,
+                    text=self.chunks[chunk_index],
+                    font=self.font,
+                    state="normal",
+                )
+                self.item_chunk[slot] = chunk_index
+            self.canvas.coords(
+                item, text_x + self.chunk_starts[chunk_index], center_y
+            )
+        for slot in range(len(visible), len(self.text_items)):
+            if self.item_chunk[slot] is not None:
+                self.canvas.itemconfigure(self.text_items[slot], state="hidden")
+                self.item_chunk[slot] = None
+
+        # The end marker is tiny; skip drawing it while it is far off screen.
         marker_radius = END_MARKER_SIZE / 2
-        self.canvas.coords(
-            self.end_marker,
-            marker_x - marker_radius,
-            center_y - marker_radius,
-            marker_x + marker_radius,
-            center_y + marker_radius,
-        )
+        if -50 <= marker_x <= width + 50:
+            self.canvas.itemconfigure(self.end_marker, state="normal")
+            self.canvas.coords(
+                self.end_marker,
+                marker_x - marker_radius,
+                center_y - marker_radius,
+                marker_x + marker_radius,
+                center_y + marker_radius,
+            )
+        else:
+            self.canvas.itemconfigure(self.end_marker, state="hidden")
 
     def configure_font(self, size):
         self.font.configure(size=size)

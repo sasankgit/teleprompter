@@ -9,7 +9,6 @@ from pathlib import Path
 
 import uiautomation as auto
 
-from player import read_text
 from ui import (
     END_MARKER_GAP,
     SIZE_MAX,
@@ -21,10 +20,19 @@ from ui import (
 )
 
 
+SEPARATOR = "      \u2022      "
 POLL_INTERVAL_MS = 250
 SELECTION_STABLE_SECONDS = 0.35
 HOVER_REPEAT_MS = 150
 HOVER_SPEED_STEP = 10
+
+
+def read_text(path):
+    with open(path, "r", encoding="utf-8") as file:
+        lines = [line.strip() for line in file.read().splitlines() if line.strip()]
+    if not lines:
+        return f"{os.path.basename(path)} is empty"
+    return SEPARATOR.join(lines)
 
 
 class AutoSignboard:
