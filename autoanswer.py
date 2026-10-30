@@ -7,6 +7,7 @@ import os
 import json
 import threading
 import time
+import uuid
 import tkinter as tk
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -30,7 +31,7 @@ POLL_INTERVAL_MS = 30
 HOVER_REPEAT_MS = 150
 HOVER_SPEED_STEP = 10
 DEFAULT_API_URL = "https://cherub-yo-yo-daffodil.ngrok-free.dev/v1/chat/completions"
-DEFAULT_API_KEY = "sk-qwen36-kaggle-custom"
+DEFAULT_API_KEY = "heytherethisismyapikey"
 
 
 def read_text(path):
@@ -38,13 +39,15 @@ def read_text(path):
         lines = [line.strip() for line in file.read().splitlines() if line.strip()]
     if not lines:
         return f"{os.path.basename(path)} is empty"
-    return SEPARATOR.join(lines)
+    return "\n".join(lines)
 
 
 class AutoSignboard:
     def __init__(self, root, args):
         self.root = root
         self.args = args
+        self.session_path = Path(args.session_file)
+        self.session_id = self.load_session_id()
         self.paused = False
         self.pos = 0.0
         self.text_width = 1
@@ -77,6 +80,19 @@ class AutoSignboard:
             return root.clipboard_get()
         except tk.TclError:
             return None
+
+    def load_session_id(self):
+        if self.args.session_id:
+            return self.args.session_id
+        try:
+            saved_id = self.session_path.read_text(encoding="utf-8").strip()
+            if saved_id:
+                return saved_id
+        except OSError:
+            pass
+        new_id = str(uuid.uuid4())[:8]
+        self.session_path.write_text(new_id, encoding="utf-8")
+        return new_id
 
     def get_selected_text(self):
         control = auto.GetFocusedControl()
@@ -127,8 +143,9 @@ class AutoSignboard:
         payload = {
             "model": "qwen3.6-35b-a3b",
             "messages": [{"role": "user", "content": text}],
+            "session_id": self.session_id,
             "temperature": 0.25,
-            "max_tokens": 220,
+            "max_tokens": 800,
             "stream": True,
         }
         request = Request(
@@ -336,6 +353,10 @@ def main():
         description="Teleprompter that follows selected and clipboard text"
     )
     parser.add_argument("--file", default="input.txt", help="text file to update")
+    parser.add_argument("--session-id", default=os.environ.get("MOCKINTERVIEW_SESSION_ID"),
+                        help="reuse a session ID selected in the Gradio saved sessions")
+    parser.add_argument("--session-file", default=".autoanswer_session",
+                        help="file used to retain this session across restarts")
     parser.add_argument(
         "--api-url", default=os.environ.get("MOCKINTERVIEW_API_URL", DEFAULT_API_URL),
         help="Kaggle interview server chat completions URL",
@@ -355,7 +376,7 @@ def main():
     parser.add_argument(
         "--size",
         type=int,
-        default=60,
+        default=36,
         help=f"font size ({SIZE_MIN}-{SIZE_MAX})",
     )
     args = parser.parse_args()
